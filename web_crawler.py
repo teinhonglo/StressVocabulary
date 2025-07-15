@@ -10,22 +10,60 @@ from urllib.parse import urljoin
 
 IGNORED_WORDS = ["教甄", "上榜", "教師甄選", "考題", "新聞"]
 
+def save_matched_post(post_dict, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, "posts.csv")
+    is_new = not os.path.exists(save_path)
+
+    with open(save_path, "a", encoding="utf-8", newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=["source", "date", "url", "title", "content", "matched_keywords"])
+        if is_new:
+            writer.writeheader()
+        writer.writerow(post_dict)
+
+def safe_request(url, headers=None, cookies=None, max_retries=3, sleep_time=2, timeout=10):
+    for attempt in range(max_retries):
+        try:
+            res = requests.get(url, headers=headers, cookies=cookies, timeout=timeout)
+            res.raise_for_status()
+            return res
+        except Exception as e:
+            print(f"⚠️ Request failed: {url} (第 {attempt+1} 次嘗試)，原因：{e}")
+            time.sleep(sleep_time)
+    time.sleep(sleep_time)
+    print(f"❌ 放棄該網址：{url}")
+    return None
+
+def load_visited_urls(output_dir):
+    visited = set()
+    csv_path = os.path.join(output_dir, "posts.csv")
+    if os.path.exists(csv_path):
+        with open(csv_path, "r", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                visited.add(row["url"])
+    return visited
+
 def fuzzy_match(text, keywords):
     if not text:
         return []
     matched = [k for k in keywords if k in text]
     return matched
 
-def crawl_ptt(board_url, keywords, max_posts, year_limit):
+def crawl_ptt(board_url, keywords, max_posts, year_limit, visited_url):
     print(f"🔍 Crawling PTT board: {board_url}")
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://www.ptt.cc/",
+        "Cookie": "over18=1"
+    }
+    
     results = []
     count = 0
     year_ago = datetime.now() - timedelta(days=365 * year_limit)
     next_url = board_url
 
     while next_url and count < max_posts:
-        res = requests.get(next_url, headers=headers, cookies={"over18": "1"})
+        res = safe_request(next_url, headers=headers, cookies={"over18": "1"})
         soup = BeautifulSoup(res.text, "html.parser")
         entries = soup.select("div.r-ent")
 
@@ -53,7 +91,16 @@ def crawl_ptt(board_url, keywords, max_posts, year_limit):
                 continue
 
             href = urljoin("https://www.ptt.cc", title_tag["href"])
-            art_res = requests.get(href, headers=headers, cookies={"over18": "1"})
+            
+            if href in visited_url:
+                count += 1
+                continue
+            
+            art_res = safe_request(href, headers=headers, cookies={"over18": "1"})
+            
+            if art_res is None:
+                continue
+            
             art_soup = BeautifulSoup(art_res.text, "html.parser")
             main_content = art_soup.select_one("#main-content")
             if main_content:
@@ -66,15 +113,17 @@ def crawl_ptt(board_url, keywords, max_posts, year_limit):
             matched_keywords = fuzzy_match(content, keywords)            
 
             if len(matched_keywords) > 0:
-                results.append({
+                matched_post ={
                     "source": board_url,
                     "date": post_date.strftime("%Y-%m-%d"),
                     "url": href,
                     "title": title,
                     "content": content,
                     "matched_keywords": " ".join(matched_keywords)
-                })
+                }
                 count += 1
+                save_matched_post(matched_post, args.output_dir)
+                results.append(matched_post)
                 print(f"✅ matched: {title}, matched_keywords: {matched_keywords}")
 
             if count >= max_posts:
@@ -92,7 +141,7 @@ def crawl_ptt(board_url, keywords, max_posts, year_limit):
 
     return results
 
-def crawl_dcard(keywords, max_posts, year_limit):
+def crawl_dcard(keywords, max_posts, year_limit, visited_url):
     print(f"🔍 Crawling Dcard 教師板（API）")
     base_url = "https://www.dcard.tw/service/api/v2/forums/teacher/posts"
     headers = {
@@ -107,7 +156,7 @@ def crawl_dcard(keywords, max_posts, year_limit):
     while count < max_posts:
         try:
             params = {"limit": 30, "before": before}
-            res = requests.get(base_url, headers=headers, params=params, timeout=10)
+            res = safe_request(base_url, headers=headers, params=params, timeout=10)
             posts = res.json()
         except Exception:
             print("❌ Dcard API 無法解析，停止爬取")
@@ -124,7 +173,10 @@ def crawl_dcard(keywords, max_posts, year_limit):
 
                 post_id = post["id"]
                 detail_url = f"https://www.dcard.tw/service/api/v2/posts/{post_id}"
-                detail_res = requests.get(detail_url, headers=headers, timeout=10)
+                if detail_url in visited_url:
+                    continue
+                
+                detail_res = safe_request(detail_url, headers=headers, timeout=10)
                 detail = detail_res.json()
 
                 title = detail.get("title", "")
@@ -139,15 +191,17 @@ def crawl_dcard(keywords, max_posts, year_limit):
                 
                 matched_keywords = fuzzy_match(content, keywords)
                 if len(matched_keywords) > 0:
-                    results.append({
+                    matched_post = {
                         "source": "dcard",
                         "date": created.strftime("%Y-%m-%d"),
                         "url": f"https://www.dcard.tw/f/teacher/p/{post_id}",
                         "title": title,
                         "content": content,
                         "matched_keywords": " ".join(matched_keywords)
-                    })
+                    }
                     count += 1
+                    save_matched_post(matched_post, args.output_dir)
+                    results.append(matched_post)
                     print(f"✅ matched: {title}, matched_keywords: {matched_keywords}")
 
                 if count >= max_posts:
@@ -175,21 +229,15 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_dir, exist_ok=True)
     all_posts = []
-
-    ptt_posts = crawl_ptt("https://www.ptt.cc/bbs/studyteacher/index.html", keywords, args.max_posts, args.year_limit)
-    ptt_posts2 = crawl_ptt("https://www.ptt.cc/bbs/Teacher/index.html", keywords, args.max_posts, args.year_limit)
-    dcard_posts = crawl_dcard(keywords, args.max_posts, args.year_limit)
+    visited_urls = load_visited_urls(args.output_dir)
+    
+    ptt_posts = crawl_ptt("https://www.ptt.cc/bbs/studyteacher/index.html", keywords, args.max_posts, args.year_limit, visited_urls)
+    ptt_posts2 = crawl_ptt("https://www.ptt.cc/bbs/Teacher/index.html", keywords, args.max_posts, args.year_limit, visited_urls)
+    dcard_posts = crawl_dcard(keywords, args.max_posts, args.year_limit, visited_urls)
     
     for post in [ptt_posts, ptt_posts2, dcard_posts]:
         if len(post) > 0:
             all_posts += post
     
-
     out_csv = os.path.join(args.output_dir, "posts.csv")
-    with open(out_csv, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["source", "date", "url", "title", "content", "matched_keywords"])
-        writer.writeheader()
-        writer.writerows(all_posts)
-
-    print(f"\n✅ 爬文完成，共儲存 {len(all_posts)} 篇文章至 {out_csv}")
-
+    print(f"\n✅ 爬文完成，原始文章{len(visited_urls)}，共新增儲存 {len(all_posts)} 篇文章至 {out_csv}")
