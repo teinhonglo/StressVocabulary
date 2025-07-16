@@ -33,8 +33,8 @@ if [ $stage -le 3 ] && [ $stop_stage -ge 3 ]; then
     # Step 3: 篩選具壓力文章
     echo "🔹 Step 3: 篩選具壓力文章"
     python3 gpt_select.py \
-      --input_csv $results/collected_posts/posts.csv \
-      --output_csv $results/filtered_posts.csv
+      --input_csv $result_dir/collected_posts/posts.csv \
+      --output_dir $result_dir/
 fi
     
 if [ $stage -le 4 ] && [ $stop_stage -ge 4 ]; then
